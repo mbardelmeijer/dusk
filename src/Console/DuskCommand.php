@@ -6,6 +6,7 @@ use Dotenv\Dotenv;
 use Illuminate\Console\Command;
 use Illuminate\Support\Str;
 use Symfony\Component\Finder\Finder;
+use Symfony\Component\Process\Exception\ProcessSignaledException;
 use Symfony\Component\Process\Exception\RuntimeException;
 use Symfony\Component\Process\Process;
 
@@ -17,14 +18,12 @@ class DuskCommand extends Command
      * @var string
      */
     protected $signature = 'dusk {--without-tty : Disable output to TTY}';
-
     /**
      * The console command description.
      *
      * @var string
      */
     protected $description = 'Run the Dusk tests for the application';
-
     /**
      * Indicates if the project has its own PHPUnit configuration.
      *
@@ -63,15 +62,23 @@ class DuskCommand extends Command
             )))->setTimeout(null);
 
             try {
-                $process->setTty(! $this->option('without-tty'));
+                $process->setTty(!$this->option('without-tty'));
             } catch (RuntimeException $e) {
-                $this->output->writeln('Warning: '.$e->getMessage());
+                $this->output->writeln('Warning: ' . $e->getMessage());
             }
 
-            return $process->run(function ($type, $line) {
-                $this->output->write($line);
-            });
+            try {
+                return $process->run(function ($type, $line) {
+                    $this->output->write($line);
+                });
+            } catch (ProcessSignaledException $e) {
+                if ($e->getSignal() !== 2) {
+                    throw $e;
+                }
+            }
         });
+
+        echo 'done!';
     }
 
     /**
@@ -91,16 +98,16 @@ class DuskCommand extends Command
     /**
      * Get the array of arguments for running PHPUnit.
      *
-     * @param  array  $options
+     * @param array $options
      * @return array
      */
     protected function phpunitArguments($options)
     {
         $options = array_values(array_filter($options, function ($option) {
-            return ! Str::startsWith($option, '--env=');
+            return !Str::startsWith($option, '--env=');
         }));
 
-        if (! file_exists($file = base_path('phpunit.dusk.xml'))) {
+        if (!file_exists($file = base_path('phpunit.dusk.xml'))) {
             $file = base_path('phpunit.dusk.xml.dist');
         }
 
@@ -116,13 +123,13 @@ class DuskCommand extends Command
     {
         $path = base_path('tests/Browser/screenshots');
 
-        if (! is_dir($path)) {
+        if (!is_dir($path)) {
             return;
         }
 
         $files = Finder::create()->files()
-                        ->in($path)
-                        ->name('failure-*');
+            ->in($path)
+            ->name('failure-*');
 
         foreach ($files as $file) {
             @unlink($file->getRealPath());
@@ -138,7 +145,7 @@ class DuskCommand extends Command
     {
         $path = base_path('tests/Browser/console');
 
-        if (! is_dir($path)) {
+        if (!is_dir($path)) {
             return;
         }
 
@@ -154,10 +161,26 @@ class DuskCommand extends Command
     /**
      * Run the given callback with the Dusk configuration files.
      *
-     * @param  \Closure  $callback
+     * @param \Closure $callback
      * @return mixed
      */
     protected function withDuskEnvironment($callback)
+    {
+        $this->setupDuskEnvironment();
+
+        try {
+            $callback();
+        } finally {
+            $this->teardownDuskEnviroment();
+        }
+    }
+
+    /**
+     * Restore the original environment.
+     *
+     * @return void
+     */
+    protected function setupDuskEnvironment()
     {
         if (file_exists(base_path($this->duskFile()))) {
             if (file_get_contents(base_path('.env')) !== file_get_contents(base_path($this->duskFile()))) {
@@ -169,13 +192,35 @@ class DuskCommand extends Command
 
         $this->writeConfiguration();
 
-        return tap($callback(), function () {
-            $this->removeConfiguration();
+        $this->setupSignalHandler();
+    }
 
-            if (file_exists(base_path($this->duskFile())) && file_exists(base_path('.env.backup'))) {
-                $this->restoreEnvironment();
-            }
+    /**
+     * Setup the SIGINT signal handler for CTRL+C exits.
+     *
+     * @return void
+     */
+    protected function setupSignalHandler()
+    {
+        declare(ticks=1);
+
+        pcntl_signal(SIGINT, function () {
+            $this->teardownDuskEnviroment();
         });
+    }
+
+    /**
+     * Setup the dusk environment.
+     *
+     * @return void
+     */
+    protected function teardownDuskEnviroment()
+    {
+        $this->removeConfiguration();
+
+        if (file_exists(base_path($this->duskFile())) && file_exists(base_path('.env.backup'))) {
+            $this->restoreEnvironment();
+        }
     }
 
     /**
@@ -210,7 +255,7 @@ class DuskCommand extends Command
     protected function refreshEnvironment()
     {
         // BC fix to support Dotenv ^2.2
-        if (! method_exists(Dotenv::class, 'create')) {
+        if (!method_exists(Dotenv::class, 'create')) {
             (new Dotenv(base_path()))->overload();
 
             return;
@@ -226,9 +271,9 @@ class DuskCommand extends Command
      */
     protected function writeConfiguration()
     {
-        if (! file_exists($file = base_path('phpunit.dusk.xml')) &&
-            ! file_exists(base_path('phpunit.dusk.xml.dist'))) {
-            copy(realpath(__DIR__.'/../../stubs/phpunit.xml'), $file);
+        if (!file_exists($file = base_path('phpunit.dusk.xml')) &&
+            !file_exists(base_path('phpunit.dusk.xml.dist'))) {
+            copy(realpath(__DIR__ . '/../../stubs/phpunit.xml'), $file);
 
             return;
         }
@@ -243,7 +288,7 @@ class DuskCommand extends Command
      */
     protected function removeConfiguration()
     {
-        if (! $this->hasPhpUnitConfiguration) {
+        if (!$this->hasPhpUnitConfiguration) {
             unlink(base_path('phpunit.dusk.xml'));
         }
     }
@@ -255,7 +300,7 @@ class DuskCommand extends Command
      */
     protected function duskFile()
     {
-        if (file_exists(base_path($file = '.env.dusk.'.$this->laravel->environment()))) {
+        if (file_exists(base_path($file = '.env.dusk.' . $this->laravel->environment()))) {
             return $file;
         }
 
